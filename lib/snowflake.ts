@@ -1,7 +1,3 @@
-import * as snowflake from "snowflake-sdk"
-
-snowflake.configure({ ocspFailOpen: false, logLevel: 'WARN'})
-
 // Type definition for CRUX data
 export interface CruxData {
   AVG_FCP: number | null
@@ -31,47 +27,46 @@ export interface CruxData {
 }
 
 export async function getCruxData(domain: string): Promise<CruxData[]> {
-    const connection = await snowflake.createConnection({
-      account: process.env.SNOWFLAKE_DATA_ACCOUNT || "",
-      username: process.env.SNOWFLAKE_DATA_USER || "",
-      password: process.env.SNOWFLAKE_DATA_PASSWORD || "",
-      database: "DWH_PROD",
-      warehouse: process.env.SNOWFLAKE_DATA_WAREHOUSE || "",
-      role: process.env.SNOWFLAKE_DATA_ROLE || "",
-    })
-  
-    await new Promise<void>((resolve, reject) => {
-      connection.connect((err) => {
-        if (err) {
-          console.error("Error connecting to Snowflake:", err)
-          reject(err)
-        } else {
-          resolve()
-        }
-      })
-    })
-  
-    const query = `
-      SELECT * FROM DWH_PROD.PRISM.CRUX 
-      WHERE DOMAIN = '${domain}'
-      ORDER BY MONTH DESC
-      LIMIT 10
-    `
-  
-    const rows: CruxData[] = await new Promise((resolve, reject) => {
-      connection.execute({
-        sqlText: query,
-        complete: (err, stmt, rows) => {
-          if (err) {
-            reject(err)
-            console.error("Error executing query:", err)
-          } else {
-            resolve(rows as CruxData[])
-          }
-        },
-      })
-    })
-  
-    return rows
+  const proxyUrl = process.env.SNOWFLAKE_PROXY_URL
+  const apiKey = process.env.SNOWFLAKE_PROXY_API_KEY
+  const protectionBypass = process.env.VERCEL_PROTECTION_BYPASS
+
+  if (!proxyUrl || !apiKey || !protectionBypass) {
+    throw new Error('Missing required environment variables for Snowflake proxy')
   }
-  
+
+  const query = `
+    SELECT * FROM DWH_PROD.PRISM.CRUX 
+    WHERE DOMAIN = '${domain}'
+    ORDER BY MONTH DESC
+    LIMIT 10
+  `
+
+  try {
+    const response = await fetch(`${proxyUrl}api/query`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'x-vercel-protection-bypass': protectionBypass
+      },
+      body: JSON.stringify({ query })
+    })
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: 'Unknown error' }))
+      throw new Error(`Proxy API error: ${errorData.error || response.statusText}`)
+    }
+
+    const result = await response.json()
+    
+    if (!result.success) {
+      throw new Error(`Query failed: ${result.error || 'Unknown error'}`)
+    }
+
+    return result.data as CruxData[]
+  } catch (error) {
+    console.error('Error querying Snowflake proxy:', error)
+    throw error
+  }
+}
